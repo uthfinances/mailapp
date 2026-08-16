@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>MailApp — Tableau de bord</title>
+<link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+<div class="app-shell">
+  <aside class="sidebar">
+    <h1>📧 MailApp</h1>
+    <nav>
+      <a data-section="dashboard" class="active">Tableau de bord</a>
+      <a data-section="campaigns">Campagnes</a>
+      <a data-section="recipients">Destinataires</a>
+      <a data-section="lists">Listes</a>
+      <a data-section="history">Historique</a>
+      <a data-section="settings">Paramètres</a>
+    </nav>
+  </aside>
+
+  <main class="main">
+    <div class="topbar">
+      <div id="userLabel"></div>
+      <button id="logoutBtn">Se déconnecter</button>
+    </div>
+
+    <!-- TABLEAU DE BORD -->
+    <section id="dashboard" class="section active">
+      <div class="stats-grid" id="statsGrid"></div>
+      <div class="card">
+        <h2>Campagnes actives</h2>
+        <table id="dashboardCampaignsTable">
+          <thead><tr><th>Nom</th><th>Statut</th><th>Prochaine exécution</th><th>Envoyés</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- CAMPAGNES -->
+    <section id="campaigns" class="section">
+      <div class="card">
+        <h2>Campagnes <button class="btn btn-primary btn-sm" id="newCampaignBtn">+ Nouvelle campagne</button></h2>
+        <table id="campaignsTable">
+          <thead>
+            <tr>
+              <th>Nom</th><th>Statut</th><th>Destinataires</th><th>Dernière exéc.</th>
+              <th>Envoyés</th><th>Échoués</th><th>Actions</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- DESTINATAIRES -->
+    <section id="recipients" class="section">
+      <div class="card">
+        <h2>Ajouter des destinataires</h2>
+        <form id="addRecipientsForm" class="form-grid">
+          <div class="full">
+            <label>Adresses e-mail (une par ligne, ou séparées par des virgules)</label>
+            <textarea id="emailsInput" placeholder="exemple1@mail.com
+exemple2@mail.com"></textarea>
+          </div>
+          <div>
+            <label>Ajouter à la liste</label>
+            <select id="recipientListSelect"></select>
+          </div>
+          <div style="align-self:end;">
+            <button type="submit" class="btn btn-primary">Ajouter</button>
+          </div>
+        </form>
+        <hr style="margin:1.2rem 0;border:none;border-top:1px solid var(--border);" />
+        <label>Ou importer un fichier CSV (colonne "email" requise, "name" optionnelle)</label>
+        <form id="csvForm">
+          <input type="file" id="csvFile" accept=".csv" />
+          <button type="submit" class="btn">Importer le CSV</button>
+        </form>
+      </div>
+
+      <div class="card">
+        <h2>Destinataires (<span id="recipientCount">0</span>)</h2>
+        <table id="recipientsTable">
+          <thead><tr><th>E-mail</th><th>Nom</th><th>Statut</th><th>Actions</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- LISTES -->
+    <section id="lists" class="section">
+      <div class="card">
+        <h2>Créer une liste / groupe</h2>
+        <form id="newListForm">
+          <input type="text" id="newListName" placeholder="Nom de la liste (ex : Prospects août 2026)" required />
+          <button type="submit" class="btn btn-primary" style="margin-top:0.6rem;">Créer</button>
+        </form>
+      </div>
+      <div class="card">
+        <h2>Listes existantes</h2>
+        <table id="listsTable">
+          <thead><tr><th>Nom</th><th>Destinataires</th><th>Créée le</th><th>Actions</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- HISTORIQUE -->
+    <section id="history" class="section">
+      <div class="card">
+        <h2>Historique des envois</h2>
+        <table id="historyTable">
+          <thead><tr><th>Date</th><th>Campagne</th><th>Groupe</th><th>Destinataires</th><th>Statut</th><th>Erreur</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- PARAMETRES -->
+    <section id="settings" class="section">
+      <div class="card">
+        <h2>Connexion e-mail</h2>
+        <p class="help">La connexion SMTP active est lue depuis les variables d'environnement (SMTP_HOST, SMTP_USER, SMTP_PASS...).</p>
+        <button class="btn" id="testSmtpBtn">Tester la connexion SMTP</button>
+        <div id="smtpTestResult" style="margin-top:0.6rem;"></div>
+        <hr style="margin:1.2rem 0;border:none;border-top:1px solid var(--border);" />
+        <h3>Connexions enregistrées</h3>
+        <table id="connectionsTable">
+          <thead><tr><th>Libellé</th><th>Fournisseur</th><th>Adresse d'envoi</th><th>Actions</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <form id="newConnectionForm" class="form-grid" style="margin-top:1rem;">
+          <div><label>Libellé</label><input type="text" id="connLabel" required /></div>
+          <div><label>Fournisseur</label>
+            <select id="connProvider">
+              <option value="smtp">SMTP</option>
+              <option value="gmail_oauth">Gmail (OAuth)</option>
+              <option value="microsoft_oauth">Outlook / Microsoft 365 (OAuth)</option>
+            </select>
+          </div>
+          <div class="full"><label>Adresse e-mail d'expédition</label><input type="email" id="connFromEmail" required /></div>
+          <div class="full"><button type="submit" class="btn btn-primary">Ajouter la connexion</button></div>
+        </form>
+      </div>
+
+      <div class="card">
+        <h2>Sécurité</h2>
+        <form id="changePasswordForm" class="form-grid">
+          <div><label>Mot de passe actuel</label><input type="password" id="currentPassword" required /></div>
+          <div><label>Nouveau mot de passe</label><input type="password" id="newPassword" required minlength="8" /></div>
+          <div class="full"><button type="submit" class="btn btn-primary">Changer le mot de passe</button></div>
+        </form>
+      </div>
+
+      <div class="card">
+        <h2>Fuseau horaire par défaut</h2>
+        <form id="timezoneForm" class="form-grid">
+          <div><label>Fuseau horaire</label>
+            <input type="text" id="timezoneInput" placeholder="Europe/Paris" />
+            <p class="help">Exemples : Europe/Paris, Africa/Porto-Novo, America/Montreal</p>
+          </div>
+          <div class="full"><button type="submit" class="btn btn-primary">Enregistrer</button></div>
+        </form>
+      </div>
+    </section>
+  </main>
+</div>
+
+<!-- MODALE CAMPAGNE -->
+<div id="campaignModalOverlay" class="modal-overlay" style="display:none;">
+  <div class="modal">
+    <h2 id="campaignModalTitle">Nouvelle campagne</h2>
+    <form id="campaignForm" class="form-grid">
+      <input type="hidden" id="campaignId" />
+      <div class="full"><label>Nom de la campagne</label><input type="text" id="campaignName" required /></div>
+
+      <div><label>Liste de destinataires</label><select id="campaignListId" required></select></div>
+      <div><label>Connexion e-mail</label><select id="campaignConnectionId"><option value="">Par défaut</option></select></div>
+
+      <div class="full"><label>Objet</label><input type="text" id="campaignSubject" required /></div>
+
+      <div class="full">
+        <label>Contenu du message (HTML)
+          <button type="button" class="btn btn-sm" id="aiGenerateBtn" style="float:right;">✨ Générer avec l'IA</button>
+        </label>
+        <textarea id="campaignBody" required></textarea>
+      </div>
+
+      <div>
+        <label><input type="checkbox" id="campaignUseBcc" checked /> Envoyer en CCI (destinataires masqués entre eux)</label>
+      </div>
+      <div><label>Taille de groupe (destinataires/envoi)</label><input type="number" id="campaignBatchSize" value="20" min="1" max="500" required /></div>
+
+      <div><label>Délai entre groupes (secondes)</label><input type="number" id="campaignDelay" value="30" min="0" /></div>
+      <div><label>Fuseau horaire</label><input type="text" id="campaignTimezone" placeholder="Europe/Paris" /></div>
+
+      <div class="full"><label>Fréquence</label>
+        <select id="campaignScheduleType">
+          <option value="once">Une seule fois (date précise)</option>
+          <option value="daily">Tous les jours</option>
+          <option value="weekly">Certains jours de la semaine</option>
+        </select>
+      </div>
+
+      <div id="scheduleOnceFields"><label>Date d'envoi</label><input type="date" id="campaignScheduleDate" /></div>
+      <div id="scheduleWeeklyFields" style="display:none;">
+        <label>Jours d'envoi</label>
+        <div id="weekdaysCheckboxes"></div>
+      </div>
+      <div><label>Heure d'envoi</label><input type="time" id="campaignScheduleTime" required /></div>
+      <div><label>Date de fin (facultative)</label><input type="date" id="campaignEndDate" /></div>
+
+      <div class="full">
+        <label><input type="checkbox" id="campaignIsActive" checked /> Campagne active</label>
+      </div>
+
+      <div class="full" style="display:flex; gap:0.5rem; justify-content:flex-end;">
+        <button type="button" class="btn" id="cancelCampaignBtn">Annuler</button>
+        <button type="submit" class="btn btn-primary">Enregistrer la campagne</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+  </html>
