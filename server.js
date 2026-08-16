@@ -604,9 +604,15 @@ app.get('/unsubscribe/:id', (req, res) => {
   res.send('<h1>Desinscription confirmee</h1><p>Vous ne recevrez plus de messages de notre part.</p>');
 });
 
-app.use(express.static(path.join(__dirname, 'public')));
+app.use((req, res, next) => {
+  if (req.path.startsWith('/data') || req.path === '/server.js' || req.path === '/package.json') {
+    return res.status(404).send('Not found');
+  }
+  next();
+});
+app.use(express.static(__dirname, { index: false }));
 app.get('/', (req, res) => {
-  if (req.session.userId) res.sendFile(path.join(__dirname, 'public', 'index.html'));
+  if (req.session.userId) res.sendFile(path.join(__dirname, 'index.html'));
   else res.redirect('/login.html');
 });
 
