@@ -122,26 +122,25 @@ exemple2@mail.com"></textarea>
     <section id="settings" class="section">
       <div class="card">
         <h2>Connexion e-mail</h2>
-        <p class="help">La connexion SMTP active est lue depuis les variables d'environnement (SMTP_HOST, SMTP_USER, SMTP_PASS...).</p>
-        <button class="btn" id="testSmtpBtn">Tester la connexion SMTP</button>
-        <div id="smtpTestResult" style="margin-top:0.6rem;"></div>
-        <hr style="margin:1.2rem 0;border:none;border-top:1px solid var(--border);" />
-        <h3>Connexions enregistrées</h3>
+        <p class="help">Chaque personne connecte ici SA PROPRE adresse Gmail (ou autre fournisseur) pour envoyer ses campagnes.</p>
+        <h3>Mes connexions</h3>
         <table id="connectionsTable">
-          <thead><tr><th>Libellé</th><th>Fournisseur</th><th>Adresse d'envoi</th><th>Actions</th></tr></thead>
+          <thead><tr><th>Libellé</th><th>Adresse d'envoi</th><th>Hôte SMTP</th><th>Actions</th></tr></thead>
           <tbody></tbody>
         </table>
         <form id="newConnectionForm" class="form-grid" style="margin-top:1rem;">
-          <div><label>Libellé</label><input type="text" id="connLabel" required /></div>
-          <div><label>Fournisseur</label>
-            <select id="connProvider">
-              <option value="smtp">SMTP</option>
-              <option value="gmail_oauth">Gmail (OAuth)</option>
-              <option value="microsoft_oauth">Outlook / Microsoft 365 (OAuth)</option>
-            </select>
+          <div><label>Libellé (ex : "Mon Gmail")</label><input type="text" id="connLabel" required /></div>
+          <div><label>Adresse e-mail d'expédition</label><input type="email" id="connFromEmail" required /></div>
+          <div><label>Hôte SMTP</label><input type="text" id="connSmtpHost" placeholder="smtp.gmail.com" required /></div>
+          <div><label>Port SMTP</label><input type="number" id="connSmtpPort" placeholder="587" value="587" required /></div>
+          <div><label>Utilisateur SMTP (souvent votre e-mail)</label><input type="text" id="connSmtpUser" required /></div>
+          <div><label>Mot de passe d'application</label><input type="password" id="connSmtpPass" required /></div>
+          <div class="full">
+            <p class="help">Pour Gmail : hôte <code>smtp.gmail.com</code>, port <code>587</code>. Générez un mot de passe d'application sur myaccount.google.com/apppasswords (nécessite la validation en 2 étapes activée).</p>
           </div>
-          <div class="full"><label>Adresse e-mail d'expédition</label><input type="email" id="connFromEmail" required /></div>
-          <div class="full"><button type="submit" class="btn btn-primary">Ajouter la connexion</button></div>
+          <div><button type="button" class="btn" id="testNewConnBtn">Tester avant d'ajouter</button></div>
+          <div id="smtpTestResult"></div>
+          <div class="full"><button type="submit" class="btn btn-primary">Ajouter ma connexion</button></div>
         </form>
       </div>
 
@@ -177,7 +176,7 @@ exemple2@mail.com"></textarea>
       <div class="full"><label>Nom de la campagne</label><input type="text" id="campaignName" required /></div>
 
       <div><label>Liste de destinataires</label><select id="campaignListId" required></select></div>
-      <div><label>Connexion e-mail</label><select id="campaignConnectionId"><option value="">Par défaut</option></select></div>
+      <div><label>Connexion e-mail (mon compte d'envoi)</label><select id="campaignConnectionId" required><option value="">— Choisir —</option></select></div>
 
       <div class="full"><label>Objet</label><input type="text" id="campaignSubject" required /></div>
 
