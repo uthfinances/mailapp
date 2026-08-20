@@ -1,6 +1,6 @@
 // MailApp — serveur unique (Express + stockage JSON + node-cron + nodemailer)
-// Stockage JSON local (pas de dependance native) pour un deploiement fiable
-// sur les hebergeurs gratuits (pas de compilation necessaire).
+// Version multi-utilisateurs : chaque personne a son compte, ses listes,
+// ses campagnes et sa propre connexion Gmail/SMTP.
 require('dotenv').config();
 
 const path = require('path');
@@ -71,16 +71,69 @@ function nowIso() {
   }
 })();
 
-function createSmtpTransport() {
-  const host = process.env.SMTP_HOST;
-  const port = Number(process.env.SMTP_PORT || 587);
-  const secure = process.env.SMTP_SECURE === 'true';
-  const user = process.env.SMTP_USER;
-  const pass = process.env.SMTP_PASS;
-  if (!host || !user || !pass) {
-    throw new Error('Configuration SMTP incomplete. Renseignez SMTP_HOST, SMTP_USER et SMTP_PASS.');
+// Migration : préserve les données créées avant le passage multi-comptes.
+// Rattache tout ce qui n'a pas encore de propriétaire au tout premier compte,
+// et recrée automatiquement une connexion e-mail à partir des anciennes
+// variables d'environnement SMTP_* si aucune connexion n'existe encore.
+(function migrateOwnership() {
+  const firstUser = store.users[0];
+  if (!firstUser) return;
+  let changed = false;
+
+  for (const table of ['lists', 'recipients', 'email_connections', 'campaigns', 'history']) {
+    for (const item of store[table]) {
+      if (item.owner_id === undefined || item.owner_id === null) {
+        item.owner_id = firstUser.id;
+        changed = true;
+      }
+    }
   }
-  return nodemailer.createTransport({ host, port, secure, auth: { user, pass } });
+
+  for (const conn of store.email_connections) {
+    if (!conn.smtp_host && process.env.SMTP_HOST) {
+      conn.smtp_host = process.env.SMTP_HOST;
+      conn.smtp_port = Number(process.env.SMTP_PORT || 587);
+      conn.smtp_secure = process.env.SMTP_SECURE === 'true';
+      conn.smtp_user = process.env.SMTP_USER;
+      conn.smtp_pass = process.env.SMTP_PASS;
+      changed = true;
+    }
+  }
+
+  if (store.email_connections.length === 0 && process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
+    store.email_connections.push({
+      id: takeId('email_connections'), owner_id: firstUser.id,
+      label: 'Connexion existante (migrée automatiquement)', from_email: process.env.SMTP_USER,
+      smtp_host: process.env.SMTP_HOST, smtp_port: Number(process.env.SMTP_PORT || 587),
+      smtp_secure: process.env.SMTP_SECURE === 'true', smtp_user: process.env.SMTP_USER,
+      smtp_pass: process.env.SMTP_PASS, created_at: nowIso(),
+    });
+    changed = true;
+  }
+
+  for (const camp of store.campaigns) {
+    if (!camp.connection_id) {
+      const conn = store.email_connections.find((c) => c.owner_id === camp.owner_id);
+      if (conn) { camp.connection_id = conn.id; changed = true; }
+    }
+  }
+
+  if (changed) {
+    save();
+    console.log('Migration des anciennes données effectuée.');
+  }
+})();
+
+function createSmtpTransportForConnection(connection) {
+  if (!connection || !connection.smtp_host || !connection.smtp_user || !connection.smtp_pass) {
+    throw new Error("Cette connexion e-mail n'est pas configuree completement (SMTP manquant).");
+  }
+  return nodemailer.createTransport({
+    host: connection.smtp_host,
+    port: Number(connection.smtp_port || 587),
+    secure: !!connection.smtp_secure,
+    auth: { user: connection.smtp_user, pass: connection.smtp_pass },
+  });
 }
 
 async function sendEmail(transport, { fromEmail, fromName, to, bcc, subject, html }) {
@@ -117,6 +170,7 @@ function chunk(arr, size) {
 function logHistory(entry) {
   store.history.unshift({
     id: takeId('history'),
+    owner_id: entry.owner_id,
     campaign_id: entry.campaign_id,
     campaign_name: entry.campaign_name,
     batch_label: entry.batch_label,
@@ -149,7 +203,7 @@ async function runCampaign(campaignId, manualTest = false) {
 
   if (recipients.length === 0) {
     logHistory({
-      campaign_id: campaign.id, campaign_name: campaign.name, batch_label: 'N/A',
+      owner_id: campaign.owner_id, campaign_id: campaign.id, campaign_name: campaign.name, batch_label: 'N/A',
       recipients_count: 0, status: 'echec', error: 'Aucun destinataire actif dans la liste associee.',
     });
     return;
@@ -157,10 +211,10 @@ async function runCampaign(campaignId, manualTest = false) {
 
   let transport;
   try {
-    transport = createSmtpTransport();
+    transport = createSmtpTransportForConnection(connection);
   } catch (err) {
     logHistory({
-      campaign_id: campaign.id, campaign_name: campaign.name, batch_label: 'N/A',
+      owner_id: campaign.owner_id, campaign_id: campaign.id, campaign_name: campaign.name, batch_label: 'N/A',
       recipients_count: recipients.length, status: 'echec', error: err.message,
     });
     return;
@@ -169,14 +223,14 @@ async function runCampaign(campaignId, manualTest = false) {
   const batchSize = campaign.batch_size || Number(process.env.MAX_RECIPIENTS_PER_BATCH || 20);
   const delaySeconds = campaign.delay_between_batches_seconds ?? Number(process.env.MIN_DELAY_BETWEEN_BATCHES_SECONDS || 30);
   const groups = chunk(recipients.map((r) => r.email), batchSize);
-  const fromEmail = (connection && connection.from_email) || process.env.SMTP_USER || '';
+  const fromEmail = connection.from_email || connection.smtp_user;
 
   let sentTotal = 0, failedTotal = 0;
 
   for (let i = 0; i < groups.length; i++) {
     if (!withinHourlyLimit()) {
       logHistory({
-        campaign_id: campaign.id, campaign_name: campaign.name,
+        owner_id: campaign.owner_id, campaign_id: campaign.id, campaign_name: campaign.name,
         batch_label: `Groupe ${i + 1}/${groups.length}`, recipients_count: groups[i].length,
         status: 'annule', error: "Limite horaire d'envoi atteinte (MAX_EMAILS_PER_HOUR).",
       });
@@ -195,13 +249,13 @@ async function runCampaign(campaignId, manualTest = false) {
     if (result.success) {
       sentTotal += group.length;
       logHistory({
-        campaign_id: campaign.id, campaign_name: campaign.name,
+        owner_id: campaign.owner_id, campaign_id: campaign.id, campaign_name: campaign.name,
         batch_label: `Groupe ${i + 1}/${groups.length}`, recipients_count: group.length, status: 'envoye',
       });
     } else {
       failedTotal += group.length;
       logHistory({
-        campaign_id: campaign.id, campaign_name: campaign.name,
+        owner_id: campaign.owner_id, campaign_id: campaign.id, campaign_name: campaign.name,
         batch_label: `Groupe ${i + 1}/${groups.length}`, recipients_count: group.length,
         status: 'echec', error: result.error,
       });
@@ -219,6 +273,7 @@ function startScheduler() {
   cron.schedule('* * * * *', async () => {
     const now = new Date();
     const campaigns = store.campaigns.filter((c) => c.is_active);
+    console.log(`[Planificateur] verification a ${now.toISOString()} - ${campaigns.length} campagne(s) active(s)`);
 
     for (const campaign of campaigns) {
       if (campaign.end_date) {
@@ -231,6 +286,8 @@ function startScheduler() {
       const dayCodes = ['SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA'];
       const todayCode = dayCodes[localNow.getDay()];
       const todayDate = `${localNow.getFullYear()}-${String(localNow.getMonth() + 1).padStart(2, '0')}-${String(localNow.getDate()).padStart(2, '0')}`;
+
+      console.log(`[Planificateur] campagne "${campaign.name}" : heure locale calculee=${currentHHMM} (fuseau ${tz}), heure programmee=${campaign.schedule_time}`);
 
       if (campaign.schedule_time !== currentHHMM) continue;
 
@@ -283,6 +340,7 @@ const apiLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 300 });
 const loginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 10 });
 app.use('/api/', apiLimiter);
 app.use('/api/auth/login', loginLimiter);
+app.use('/api/auth/register', loginLimiter);
 
 app.use(
   session({
@@ -308,6 +366,7 @@ const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const isValidEmail = (e) => EMAIL_REGEX.test((e || '').trim());
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
 
+// ---- AUTH (connexion, inscription) ----
 const authRouter = express.Router();
 authRouter.post('/login', (req, res) => {
   const { email, password } = req.body || {};
@@ -316,6 +375,23 @@ authRouter.post('/login', (req, res) => {
   if (!user || !bcrypt.compareSync(password, user.password_hash)) {
     return res.status(401).json({ error: 'Identifiants incorrects.' });
   }
+  req.session.userId = user.id;
+  req.session.userEmail = user.email;
+  res.json({ ok: true });
+});
+authRouter.post('/register', (req, res) => {
+  const { email, password, inviteCode } = req.body || {};
+  if (!isValidEmail(email)) return res.status(400).json({ error: 'Adresse e-mail invalide.' });
+  if (!password || password.length < 8) return res.status(400).json({ error: 'Le mot de passe doit contenir au moins 8 caracteres.' });
+  if (process.env.INVITE_CODE && inviteCode !== process.env.INVITE_CODE) {
+    return res.status(403).json({ error: "Code d'invitation incorrect." });
+  }
+  if (store.users.find((u) => u.email === email)) {
+    return res.status(400).json({ error: 'Un compte existe deja avec cette adresse.' });
+  }
+  const user = { id: takeId('users'), email, password_hash: bcrypt.hashSync(password, 12), created_at: nowIso() };
+  store.users.push(user);
+  save();
   req.session.userId = user.id;
   req.session.userEmail = user.email;
   res.json({ ok: true });
@@ -339,48 +415,50 @@ authRouter.post('/change-password', (req, res) => {
 });
 app.use('/api/auth', authRouter);
 
+// ---- DESTINATAIRES / LISTES (propres a chaque utilisateur) ----
 const recipientsRouter = express.Router();
 recipientsRouter.get('/lists', (req, res) => {
   res.json(
-    store.lists.map((l) => ({
-      id: l.id, name: l.name, created_at: l.created_at,
-      recipient_count: (l.recipient_ids || []).length,
-    }))
+    store.lists
+      .filter((l) => l.owner_id === req.session.userId)
+      .map((l) => ({ id: l.id, name: l.name, created_at: l.created_at, recipient_count: (l.recipient_ids || []).length }))
   );
 });
 recipientsRouter.post('/lists', (req, res) => {
   const name = (req.body.name || '').trim();
   if (!name) return res.status(400).json({ error: 'Le nom de la liste est requis.' });
-  const list = { id: takeId('lists'), name, created_at: nowIso(), recipient_ids: [] };
+  const list = { id: takeId('lists'), owner_id: req.session.userId, name, created_at: nowIso(), recipient_ids: [] };
   store.lists.unshift(list);
   save();
   res.json({ id: list.id });
 });
 recipientsRouter.delete('/lists/:id', (req, res) => {
-  store.lists = store.lists.filter((l) => l.id !== Number(req.params.id));
+  const list = store.lists.find((l) => l.id === Number(req.params.id) && l.owner_id === req.session.userId);
+  if (!list) return res.status(404).json({ error: 'Liste introuvable.' });
+  store.lists = store.lists.filter((l) => l.id !== list.id);
   save();
   res.json({ ok: true });
 });
 recipientsRouter.get('/', (req, res) => {
   const listId = req.query.list_id ? Number(req.query.list_id) : null;
   if (listId) {
-    const list = store.lists.find((l) => l.id === listId);
+    const list = store.lists.find((l) => l.id === listId && l.owner_id === req.session.userId);
     const rows = list ? (list.recipient_ids || []).map((id) => store.recipients.find((r) => r.id === id)).filter(Boolean) : [];
     return res.json(rows);
   }
-  res.json(store.recipients);
+  res.json(store.recipients.filter((r) => r.owner_id === req.session.userId));
 });
 recipientsRouter.post('/', (req, res) => {
   const emails = (req.body.emails || '').split(/[\n,;]+/).map((e) => e.trim()).filter(Boolean);
   const listId = req.body.list_id ? Number(req.body.list_id) : null;
-  const list = listId ? store.lists.find((l) => l.id === listId) : null;
+  const list = listId ? store.lists.find((l) => l.id === listId && l.owner_id === req.session.userId) : null;
   let added = 0, duplicates = 0, invalid = [];
   for (const email of emails) {
     if (!isValidEmail(email)) { invalid.push(email); continue; }
-    let recipient = store.recipients.find((r) => r.email === email);
+    let recipient = store.recipients.find((r) => r.email === email && r.owner_id === req.session.userId);
     if (recipient) { duplicates++; }
     else {
-      recipient = { id: takeId('recipients'), email, name: '', unsubscribed: 0, created_at: nowIso() };
+      recipient = { id: takeId('recipients'), owner_id: req.session.userId, email, name: '', unsubscribed: 0, created_at: nowIso() };
       store.recipients.push(recipient);
       added++;
     }
@@ -392,7 +470,7 @@ recipientsRouter.post('/', (req, res) => {
 recipientsRouter.post('/import-csv', upload.single('file'), (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'Aucun fichier recu.' });
   const listId = req.body.list_id ? Number(req.body.list_id) : null;
-  const list = listId ? store.lists.find((l) => l.id === listId) : null;
+  const list = listId ? store.lists.find((l) => l.id === listId && l.owner_id === req.session.userId) : null;
   let records;
   try {
     records = parse(req.file.buffer, { columns: true, skip_empty_lines: true, trim: true });
@@ -404,10 +482,10 @@ recipientsRouter.post('/import-csv', upload.single('file'), (req, res) => {
     const email = (row.email || row.Email || row.EMAIL || '').trim();
     const name = (row.name || row.Name || '').trim();
     if (!email || !isValidEmail(email)) { invalid++; continue; }
-    let recipient = store.recipients.find((r) => r.email === email);
+    let recipient = store.recipients.find((r) => r.email === email && r.owner_id === req.session.userId);
     if (recipient) { duplicates++; }
     else {
-      recipient = { id: takeId('recipients'), email, name, unsubscribed: 0, created_at: nowIso() };
+      recipient = { id: takeId('recipients'), owner_id: req.session.userId, email, name, unsubscribed: 0, created_at: nowIso() };
       store.recipients.push(recipient);
       added++;
     }
@@ -419,7 +497,7 @@ recipientsRouter.post('/import-csv', upload.single('file'), (req, res) => {
 recipientsRouter.put('/:id', (req, res) => {
   const { email, name } = req.body || {};
   if (email && !isValidEmail(email)) return res.status(400).json({ error: 'Adresse e-mail invalide.' });
-  const recipient = store.recipients.find((r) => r.id === Number(req.params.id));
+  const recipient = store.recipients.find((r) => r.id === Number(req.params.id) && r.owner_id === req.session.userId);
   if (!recipient) return res.status(404).json({ error: 'Destinataire introuvable.' });
   if (email) recipient.email = email;
   if (name !== undefined) recipient.name = name;
@@ -428,6 +506,8 @@ recipientsRouter.put('/:id', (req, res) => {
 });
 recipientsRouter.delete('/:id', (req, res) => {
   const id = Number(req.params.id);
+  const recipient = store.recipients.find((r) => r.id === id && r.owner_id === req.session.userId);
+  if (!recipient) return res.status(404).json({ error: 'Destinataire introuvable.' });
   store.recipients = store.recipients.filter((r) => r.id !== id);
   for (const list of store.lists) list.recipient_ids = (list.recipient_ids || []).filter((rid) => rid !== id);
   save();
@@ -440,10 +520,11 @@ recipientsRouter.post('/:id/unsubscribe', (req, res) => {
 });
 app.use('/api/recipients', requireAuth, recipientsRouter);
 
+// ---- CAMPAGNES (propres a chaque utilisateur) ----
 const campaignsRouter = express.Router();
-campaignsRouter.get('/', (req, res) => res.json(store.campaigns));
+campaignsRouter.get('/', (req, res) => res.json(store.campaigns.filter((c) => c.owner_id === req.session.userId)));
 campaignsRouter.get('/:id', (req, res) => {
-  const c = store.campaigns.find((c) => c.id === Number(req.params.id));
+  const c = store.campaigns.find((c) => c.id === Number(req.params.id) && c.owner_id === req.session.userId);
   if (!c) return res.status(404).json({ error: 'Campagne introuvable.' });
   res.json(c);
 });
@@ -464,6 +545,7 @@ function validateCampaign(b) {
   if (!b.subject || !b.subject.trim()) return "L'objet est requis.";
   if (!b.body_html || !b.body_html.trim()) return 'Le contenu du message est requis.';
   if (!b.list_id) return 'Une liste de destinataires doit etre selectionnee.';
+  if (!b.connection_id) return 'Une connexion e-mail (votre Gmail) doit etre selectionnee.';
   if (!['once', 'daily', 'weekly', 'custom_cron'].includes(b.schedule_type)) return 'Frequence invalide.';
   if (!b.batch_size || b.batch_size < 1 || b.batch_size > 500) return 'Taille de groupe invalide.';
   return null;
@@ -471,9 +553,13 @@ function validateCampaign(b) {
 campaignsRouter.post('/', (req, res) => {
   const err = validateCampaign(req.body);
   if (err) return res.status(400).json({ error: err });
+  const list = store.lists.find((l) => l.id === Number(req.body.list_id) && l.owner_id === req.session.userId);
+  if (!list) return res.status(400).json({ error: 'Liste invalide.' });
+  const conn = store.email_connections.find((c) => c.id === Number(req.body.connection_id) && c.owner_id === req.session.userId);
+  if (!conn) return res.status(400).json({ error: 'Connexion e-mail invalide.' });
   const p = campaignPayload(req.body);
   const campaign = {
-    id: takeId('campaigns'), ...p,
+    id: takeId('campaigns'), owner_id: req.session.userId, ...p,
     last_run_at: null, next_run_at: null, sent_count: 0, failed_count: 0,
     created_at: nowIso(), updated_at: nowIso(),
   };
@@ -484,27 +570,31 @@ campaignsRouter.post('/', (req, res) => {
 campaignsRouter.put('/:id', (req, res) => {
   const err = validateCampaign(req.body);
   if (err) return res.status(400).json({ error: err });
-  const campaign = store.campaigns.find((c) => c.id === Number(req.params.id));
+  const campaign = store.campaigns.find((c) => c.id === Number(req.params.id) && c.owner_id === req.session.userId);
   if (!campaign) return res.status(404).json({ error: 'Campagne introuvable.' });
   Object.assign(campaign, campaignPayload(req.body), { updated_at: nowIso() });
   save();
   res.json({ ok: true });
 });
 campaignsRouter.post('/:id/toggle', (req, res) => {
-  const c = store.campaigns.find((c) => c.id === Number(req.params.id));
+  const c = store.campaigns.find((c) => c.id === Number(req.params.id) && c.owner_id === req.session.userId);
   if (!c) return res.status(404).json({ error: 'Campagne introuvable.' });
   c.is_active = c.is_active ? 0 : 1;
   save();
   res.json({ ok: true, is_active: !!c.is_active });
 });
 campaignsRouter.delete('/:id', (req, res) => {
-  store.campaigns = store.campaigns.filter((c) => c.id !== Number(req.params.id));
+  const c = store.campaigns.find((c) => c.id === Number(req.params.id) && c.owner_id === req.session.userId);
+  if (!c) return res.status(404).json({ error: 'Campagne introuvable.' });
+  store.campaigns = store.campaigns.filter((c2) => c2.id !== c.id);
   save();
   res.json({ ok: true });
 });
 campaignsRouter.post('/:id/test', async (req, res) => {
+  const c = store.campaigns.find((c) => c.id === Number(req.params.id) && c.owner_id === req.session.userId);
+  if (!c) return res.status(404).json({ error: 'Campagne introuvable.' });
   try {
-    await runCampaign(Number(req.params.id), true);
+    await runCampaign(c.id, true);
     res.json({ ok: true, message: "Envoi test termine. Consultez l'historique pour le detail." });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -512,30 +602,46 @@ campaignsRouter.post('/:id/test', async (req, res) => {
 });
 app.use('/api/campaigns', requireAuth, campaignsRouter);
 
+// ---- CONNEXIONS E-MAIL (propres a chaque utilisateur, SMTP saisi par la personne) ----
 const connectionsRouter = express.Router();
-connectionsRouter.get('/', (req, res) => res.json(store.email_connections));
+connectionsRouter.get('/', (req, res) => {
+  res.json(
+    store.email_connections
+      .filter((c) => c.owner_id === req.session.userId)
+      .map((c) => ({ id: c.id, label: c.label, from_email: c.from_email, smtp_host: c.smtp_host, smtp_user: c.smtp_user, created_at: c.created_at }))
+  );
+});
 connectionsRouter.post('/', (req, res) => {
-  const { label, from_email, provider } = req.body || {};
-  if (!label || !isValidEmail(from_email) || !['smtp', 'gmail_oauth', 'microsoft_oauth'].includes(provider)) {
-    return res.status(400).json({ error: 'Champs invalides.' });
+  const { label, from_email, smtp_host, smtp_port, smtp_secure, smtp_user, smtp_pass } = req.body || {};
+  if (!label || !isValidEmail(from_email) || !smtp_host || !smtp_user || !smtp_pass) {
+    return res.status(400).json({ error: 'Tous les champs (libelle, adresse, hote SMTP, utilisateur, mot de passe) sont requis.' });
   }
   const conn = {
-    id: takeId('email_connections'), provider, label, from_email,
-    config_json: JSON.stringify({ note: "Identifiants lus depuis les variables d'environnement." }),
-    is_default: 0, created_at: nowIso(),
+    id: takeId('email_connections'), owner_id: req.session.userId,
+    label, from_email, smtp_host, smtp_port: Number(smtp_port || 587), smtp_secure: !!smtp_secure,
+    smtp_user, smtp_pass, created_at: nowIso(),
   };
   store.email_connections.push(conn);
   save();
   res.json({ id: conn.id });
 });
 connectionsRouter.delete('/:id', (req, res) => {
-  store.email_connections = store.email_connections.filter((c) => c.id !== Number(req.params.id));
+  const conn = store.email_connections.find((c) => c.id === Number(req.params.id) && c.owner_id === req.session.userId);
+  if (!conn) return res.status(404).json({ error: 'Connexion introuvable.' });
+  store.email_connections = store.email_connections.filter((c) => c.id !== conn.id);
   save();
   res.json({ ok: true });
 });
 connectionsRouter.post('/test-smtp', async (req, res) => {
+  const { smtp_host, smtp_port, smtp_secure, smtp_user, smtp_pass } = req.body || {};
+  if (!smtp_host || !smtp_user || !smtp_pass) {
+    return res.status(400).json({ error: 'Renseignez au moins l\'hote, l\'utilisateur et le mot de passe SMTP.' });
+  }
   try {
-    const transport = createSmtpTransport();
+    const transport = nodemailer.createTransport({
+      host: smtp_host, port: Number(smtp_port || 587), secure: !!smtp_secure,
+      auth: { user: smtp_user, pass: smtp_pass },
+    });
     await transport.verify();
     res.json({ ok: true, message: 'Connexion SMTP valide.' });
   } catch (err) {
@@ -544,6 +650,7 @@ connectionsRouter.post('/test-smtp', async (req, res) => {
 });
 app.use('/api/connections', requireAuth, connectionsRouter);
 
+// ---- IA (facultatif) ----
 const aiRouter = express.Router();
 aiRouter.post('/generate', async (req, res) => {
   const instruction = (req.body.instruction || '').trim();
@@ -575,17 +682,19 @@ aiRouter.post('/generate', async (req, res) => {
 });
 app.use('/api/ai', requireAuth, aiRouter);
 
+// ---- HISTORIQUE / STATS / PARAMETRES (propres a chaque utilisateur) ----
 const miscRouter = express.Router();
 miscRouter.get('/history', (req, res) => {
   const limit = Number(req.query.limit || 100);
-  res.json(store.history.slice(0, limit));
+  res.json(store.history.filter((h) => h.owner_id === req.session.userId).slice(0, limit));
 });
 miscRouter.get('/stats', (req, res) => {
-  const totalCampaigns = store.campaigns.length;
-  const activeCampaigns = store.campaigns.filter((c) => c.is_active).length;
-  const totalRecipients = store.recipients.filter((r) => !r.unsubscribed).length;
-  const totalSent = store.campaigns.reduce((s, c) => s + (c.sent_count || 0), 0);
-  const totalFailed = store.campaigns.reduce((s, c) => s + (c.failed_count || 0), 0);
+  const myCampaigns = store.campaigns.filter((c) => c.owner_id === req.session.userId);
+  const totalCampaigns = myCampaigns.length;
+  const activeCampaigns = myCampaigns.filter((c) => c.is_active).length;
+  const totalRecipients = store.recipients.filter((r) => r.owner_id === req.session.userId && !r.unsubscribed).length;
+  const totalSent = myCampaigns.reduce((s, c) => s + (c.sent_count || 0), 0);
+  const totalFailed = myCampaigns.reduce((s, c) => s + (c.failed_count || 0), 0);
   res.json({ totalCampaigns, activeCampaigns, totalRecipients, totalSent, totalFailed });
 });
 miscRouter.get('/settings', (req, res) => {
