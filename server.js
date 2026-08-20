@@ -147,7 +147,7 @@ function createSmtpTransportForConnection(connection) {
   });
 }
 
-async function sendEmail(transport, { fromEmail, fromName, to, bcc, subject, html }) {
+
 
 async function sendEmail(transport, { fromEmail, fromName, to, bcc, subject, html }) {
   try {
