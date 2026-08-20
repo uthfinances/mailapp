@@ -30,6 +30,24 @@ function fmtDate(d) {
   return new Date(d.includes('Z') ? d : d + 'Z').toLocaleString('fr-FR');
 }
 
+// ---------- Gestionnaire de clics délégué (plus fiable que les onclick inline) ----------
+document.addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-action]');
+  if (!btn) return;
+  const id = Number(btn.dataset.id);
+  const action = btn.dataset.action;
+  const actions = {
+    'edit-campaign': () => editCampaign(id),
+    'toggle-campaign': () => toggleCampaign(id),
+    'test-campaign': () => testCampaign(id),
+    'delete-campaign': () => deleteCampaign(id),
+    'delete-recipient': () => deleteRecipient(id),
+    'delete-list': () => deleteList(id),
+    'delete-connection': () => deleteConnection(id),
+  };
+  if (actions[action]) actions[action]();
+});
+
 // ---------- Navigation ----------
 document.querySelectorAll('.sidebar nav a').forEach((link) => {
   link.addEventListener('click', () => {
@@ -102,10 +120,10 @@ async function loadCampaigns() {
         <td>${c.sent_count}</td>
         <td>${c.failed_count}</td>
         <td>
-          <button class="btn btn-sm" onclick="editCampaign(${c.id})">Modifier</button>
-          <button class="btn btn-sm" onclick="toggleCampaign(${c.id})">${c.is_active ? 'Désactiver' : 'Activer'}</button>
-          <button class="btn btn-sm" onclick="testCampaign(${c.id})">Tester</button>
-          <button class="btn btn-sm btn-danger" onclick="deleteCampaign(${c.id})">Supprimer</button>
+          <button class="btn btn-sm" data-action="edit-campaign" data-id="${c.id}">Modifier</button>
+          <button class="btn btn-sm" data-action="toggle-campaign" data-id="${c.id}">${c.is_active ? 'Désactiver' : 'Activer'}</button>
+          <button class="btn btn-sm" data-action="test-campaign" data-id="${c.id}">Tester</button>
+          <button class="btn btn-sm btn-danger" data-action="delete-campaign" data-id="${c.id}">Supprimer</button>
         </td>
       </tr>`;
     })
@@ -142,8 +160,8 @@ async function populateCampaignSelects() {
     .map((l) => `<option value="${l.id}">${l.name} (${l.recipient_count})</option>`)
     .join('');
   document.getElementById('campaignConnectionId').innerHTML =
-    '<option value="">Par défaut</option>' +
-    connectionsCache.map((c) => `<option value="${c.id}">${c.label} (${c.provider})</option>`).join('');
+    '<option value="">— Choisir —</option>' +
+    connectionsCache.map((c) => `<option value="${c.id}">${c.label} (${c.from_email})</option>`).join('');
 }
 
 const weekdayLabels = [
@@ -173,6 +191,7 @@ document.getElementById('cancelCampaignBtn').addEventListener('click', () => {
 });
 
 async function editCampaign(id) {
+  try {
   await populateCampaignSelects();
   const c = await api(`/campaigns/${id}`);
   document.getElementById('campaignModalTitle').textContent = 'Modifier la campagne';
@@ -195,6 +214,9 @@ async function editCampaign(id) {
   const days = (c.schedule_days || '').split(',');
   document.querySelectorAll('.weekday-cb').forEach((cb) => (cb.checked = days.includes(cb.value)));
   document.getElementById('campaignModalOverlay').style.display = 'flex';
+  } catch (err) {
+    toast(err.message || 'Erreur lors du chargement de la campagne.', true);
+  }
 }
 
 document.getElementById('campaignForm').addEventListener('submit', async (e) => {
@@ -257,7 +279,7 @@ async function loadRecipients() {
     .map(
       (r) => `<tr><td>${r.email}</td><td>${r.name || ''}</td>
       <td>${r.unsubscribed ? '<span class="badge inactive">Désinscrit</span>' : '<span class="badge active">Actif</span>'}</td>
-      <td><button class="btn btn-sm btn-danger" onclick="deleteRecipient(${r.id})">Supprimer</button></td></tr>`
+      <td><button class="btn btn-sm btn-danger" data-action="delete-recipient" data-id="${r.id}">Supprimer</button></td></tr>`
     )
     .join('') || '<tr><td colspan="4">Aucun destinataire.</td></tr>';
 }
@@ -306,7 +328,7 @@ async function loadLists() {
   document.querySelector('#listsTable tbody').innerHTML = lists
     .map(
       (l) => `<tr><td>${l.name}</td><td>${l.recipient_count}</td><td>${fmtDate(l.created_at)}</td>
-      <td><button class="btn btn-sm btn-danger" onclick="deleteList(${l.id})">Supprimer</button></td></tr>`
+      <td><button class="btn btn-sm btn-danger" data-action="delete-list" data-id="${l.id}">Supprimer</button></td></tr>`
     )
     .join('') || '<tr><td colspan="4">Aucune liste.</td></tr>';
 }
@@ -344,10 +366,10 @@ async function loadSettingsSection() {
   connectionsCache = await api('/connections');
   document.querySelector('#connectionsTable tbody').innerHTML = connectionsCache
     .map(
-      (c) => `<tr><td>${c.label}</td><td>${c.provider}</td><td>${c.from_email}</td>
-      <td><button class="btn btn-sm btn-danger" onclick="deleteConnection(${c.id})">Supprimer</button></td></tr>`
+      (c) => `<tr><td>${c.label}</td><td>${c.from_email}</td><td>${c.smtp_host || '—'}</td>
+      <td><button class="btn btn-sm btn-danger" data-action="delete-connection" data-id="${c.id}">Supprimer</button></td></tr>`
     )
-    .join('') || '<tr><td colspan="4">Aucune connexion enregistrée.</td></tr>';
+    .join('') || '<tr><td colspan="4">Aucune connexion enregistrée. Ajoutez la vôtre ci-dessous.</td></tr>';
 
   const settings = await api('/settings');
   document.getElementById('timezoneInput').value = settings.timezone || 'Europe/Paris';
@@ -359,28 +381,39 @@ async function deleteConnection(id) {
   loadSettingsSection();
 }
 
+function currentConnFields() {
+  return {
+    label: document.getElementById('connLabel').value,
+    from_email: document.getElementById('connFromEmail').value,
+    smtp_host: document.getElementById('connSmtpHost').value,
+    smtp_port: document.getElementById('connSmtpPort').value,
+    smtp_secure: false,
+    smtp_user: document.getElementById('connSmtpUser').value,
+    smtp_pass: document.getElementById('connSmtpPass').value,
+  };
+}
+
 document.getElementById('newConnectionForm').addEventListener('submit', async (e) => {
   e.preventDefault();
-  const payload = {
-    label: document.getElementById('connLabel').value,
-    provider: document.getElementById('connProvider').value,
-    from_email: document.getElementById('connFromEmail').value,
-  };
+  const payload = currentConnFields();
   try {
     await api('/connections', { method: 'POST', body: JSON.stringify(payload) });
-    toast('Connexion ajoutée.');
+    toast('Votre connexion e-mail a été ajoutée.');
     e.target.reset();
+    document.getElementById('connSmtpPort').value = '587';
+    document.getElementById('smtpTestResult').textContent = '';
     loadSettingsSection();
   } catch (err) {
     toast(err.message, true);
   }
 });
 
-document.getElementById('testSmtpBtn').addEventListener('click', async () => {
+document.getElementById('testNewConnBtn').addEventListener('click', async () => {
   const resultEl = document.getElementById('smtpTestResult');
   resultEl.textContent = 'Test en cours...';
   try {
-    const res = await api('/connections/test-smtp', { method: 'POST' });
+    const payload = currentConnFields();
+    const res = await api('/connections/test-smtp', { method: 'POST', body: JSON.stringify(payload) });
     resultEl.textContent = '✅ ' + res.message;
   } catch (err) {
     resultEl.textContent = '❌ ' + err.message;
