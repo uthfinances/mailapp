@@ -125,6 +125,27 @@ function nowIso() {
 })();
 
 function createSmtpTransportForConnection(connection) {
+  if (!connection || !connection.smtp_user || !connection.smtp_pass) {
+    throw new Error("Connexion Gmail incomplète : adresse e-mail ou mot de passe d'application manquant.");
+  }
+
+  const isGmail =
+    connection.smtp_host === 'smtp.gmail.com' ||
+    connection.smtp_user.toLowerCase().endsWith('@gmail.com');
+
+  return nodemailer.createTransport({
+    host: isGmail ? 'smtp.gmail.com' : connection.smtp_host,
+    port: isGmail ? 465 : Number(connection.smtp_port || 587),
+    secure: isGmail ? true : !!connection.smtp_secure,
+    auth: {
+      user: connection.smtp_user,
+      pass: connection.smtp_pass
+    },
+    connectionTimeout: 30000,
+    greetingTimeout: 30000,
+    socketTimeout: 60000
+  });
+}
   if (!connection || !connection.smtp_host || !connection.smtp_user || !connection.smtp_pass) {
     throw new Error("Cette connexion e-mail n'est pas configuree completement (SMTP manquant).");
   }
