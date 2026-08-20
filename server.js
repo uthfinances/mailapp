@@ -125,8 +125,8 @@ function nowIso() {
 })();
 
 function createSmtpTransportForConnection(connection) {
-  if (!connection || !connection.smtp_user || !connection.smtp_pass) {
-    throw new Error("Connexion Gmail incomplète : adresse e-mail ou mot de passe d'application manquant.");
+  if (!connection || !connection.smtp_host || !connection.smtp_user || !connection.smtp_pass) {
+    throw new Error("Cette connexion e-mail n'est pas configuree completement (SMTP manquant).");
   }
 
   const isGmail =
@@ -146,16 +146,8 @@ function createSmtpTransportForConnection(connection) {
     socketTimeout: 60000
   });
 }
-  if (!connection || !connection.smtp_host || !connection.smtp_user || !connection.smtp_pass) {
-    throw new Error("Cette connexion e-mail n'est pas configuree completement (SMTP manquant).");
-  }
-  return nodemailer.createTransport({
-    host: connection.smtp_host,
-    port: Number(connection.smtp_port || 587),
-    secure: !!connection.smtp_secure,
-    auth: { user: connection.smtp_user, pass: connection.smtp_pass },
-  });
-}
+
+async function sendEmail(transport, { fromEmail, fromName, to, bcc, subject, html }) {
 
 async function sendEmail(transport, { fromEmail, fromName, to, bcc, subject, html }) {
   try {
