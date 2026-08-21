@@ -1,6 +1,7 @@
-// MailApp — serveur unique (Express + stockage JSON + node-cron + nodemailer)
+// MailApp — serveur unique (Express + stockage JSON + node-cron + API Brevo)
 // Version multi-utilisateurs : chaque personne a son compte, ses listes,
-// ses campagnes et sa propre connexion Gmail/SMTP.
+// ses campagnes et sa propre connexion d'envoi (via l'API Brevo, car les
+// hebergeurs gratuits comme Render bloquent les ports SMTP sortants).
 require('dotenv').config();
 
 const path = require('path');
@@ -12,7 +13,6 @@ const rateLimit = require('express-rate-limit');
 const bcrypt = require('bcryptjs');
 const multer = require('multer');
 const { parse } = require('csv-parse/sync');
-const nodemailer = require('nodemailer');
 const cron = require('node-cron');
 
 const dataDir = path.join(__dirname, 'data');
@@ -72,9 +72,7 @@ function nowIso() {
 })();
 
 // Migration : préserve les données créées avant le passage multi-comptes.
-// Rattache tout ce qui n'a pas encore de propriétaire au tout premier compte,
-// et recrée automatiquement une connexion e-mail à partir des anciennes
-// variables d'environnement SMTP_* si aucune connexion n'existe encore.
+// Rattache tout ce qui n'a pas encore de propriétaire au tout premier compte.
 (function migrateOwnership() {
   const firstUser = store.users[0];
   if (!firstUser) return;
@@ -89,34 +87,9 @@ function nowIso() {
     }
   }
 
-  for (const conn of store.email_connections) {
-    if (!conn.smtp_host && process.env.SMTP_HOST) {
-      conn.smtp_host = process.env.SMTP_HOST;
-      conn.smtp_port = Number(process.env.SMTP_PORT || 587);
-      conn.smtp_secure = process.env.SMTP_SECURE === 'true';
-      conn.smtp_user = process.env.SMTP_USER;
-      conn.smtp_pass = process.env.SMTP_PASS;
-      changed = true;
-    }
-  }
-
-  if (store.email_connections.length === 0 && process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
-    store.email_connections.push({
-      id: takeId('email_connections'), owner_id: firstUser.id,
-      label: 'Connexion existante (migrée automatiquement)', from_email: process.env.SMTP_USER,
-      smtp_host: process.env.SMTP_HOST, smtp_port: Number(process.env.SMTP_PORT || 587),
-      smtp_secure: process.env.SMTP_SECURE === 'true', smtp_user: process.env.SMTP_USER,
-      smtp_pass: process.env.SMTP_PASS, created_at: nowIso(),
-    });
-    changed = true;
-  }
-
-  for (const camp of store.campaigns) {
-    if (!camp.connection_id) {
-      const conn = store.email_connections.find((c) => c.owner_id === camp.owner_id);
-      if (conn) { camp.connection_id = conn.id; changed = true; }
-    }
-  }
+  // Les anciennes connexions SMTP ne fonctionnent plus (Render bloque le SMTP
+  // sortant sur son offre gratuite) : chaque personne doit ajouter une
+  // connexion Brevo depuis Paramètres. Rien d'autre à migrer ici.
 
   if (changed) {
     save();
@@ -124,41 +97,36 @@ function nowIso() {
   }
 })();
 
-function createSmtpTransportForConnection(connection) {
-  if (!connection || !connection.smtp_host || !connection.smtp_user || !connection.smtp_pass) {
-    throw new Error("Cette connexion e-mail n'est pas configuree completement (SMTP manquant).");
+// Envoi via l'API HTTPS de Brevo (jamais bloquée, contrairement au SMTP sur
+// les hebergeurs gratuits). Chaque connexion stocke sa propre cle API Brevo.
+async function sendEmailViaBrevo(connection, { to, bcc, subject, html }) {
+  if (!connection || !connection.brevo_api_key || !connection.from_email) {
+    return { success: false, error: "Cette connexion n'est pas configuree completement (cle API Brevo manquante)." };
   }
+  const payload = {
+    sender: { name: connection.from_name || connection.label || connection.from_email, email: connection.from_email },
+    to: (to && to.length > 0 ? to : [connection.from_email]).map((e) => ({ email: e })),
+    subject,
+    htmlContent: html,
+  };
+  if (bcc && bcc.length > 0) payload.bcc = bcc.map((e) => ({ email: e }));
 
-  const isGmail =
-    connection.smtp_host === 'smtp.gmail.com' ||
-    connection.smtp_user.toLowerCase().endsWith('@gmail.com');
-
-  return nodemailer.createTransport({
-    host: isGmail ? 'smtp.gmail.com' : connection.smtp_host,
-    port: isGmail ? 465 : Number(connection.smtp_port || 587),
-    secure: isGmail ? true : !!connection.smtp_secure,
-    auth: {
-      user: connection.smtp_user,
-      pass: connection.smtp_pass
-    },
-    connectionTimeout: 30000,
-    greetingTimeout: 30000,
-    socketTimeout: 60000
-  });
-}
-
-
-
-async function sendEmail(transport, { fromEmail, fromName, to, bcc, subject, html }) {
   try {
-    const info = await transport.sendMail({
-      from: fromName ? `"${fromName}" <${fromEmail}>` : fromEmail,
-      to: to && to.length > 0 ? to : fromEmail,
-      bcc: bcc && bcc.length > 0 ? bcc : undefined,
-      subject,
-      html,
+    const res = await fetch('https://api.brevo.com/v3/smtp/email', {
+      method: 'POST',
+      headers: {
+        'api-key': connection.brevo_api_key,
+        'Content-Type': 'application/json',
+        accept: 'application/json',
+      },
+      body: JSON.stringify(payload),
     });
-    return { success: true, messageId: info.messageId };
+    if (!res.ok) {
+      const errText = await res.text();
+      return { success: false, error: `Brevo a refuse l'envoi : ${errText}` };
+    }
+    const data = await res.json();
+    return { success: true, messageId: data.messageId };
   } catch (err) {
     return { success: false, error: err.message || String(err) };
   }
@@ -222,13 +190,11 @@ async function runCampaign(campaignId, manualTest = false) {
     return;
   }
 
-  let transport;
-  try {
-    transport = createSmtpTransportForConnection(connection);
-  } catch (err) {
+  if (!connection || !connection.brevo_api_key) {
     logHistory({
       owner_id: campaign.owner_id, campaign_id: campaign.id, campaign_name: campaign.name, batch_label: 'N/A',
-      recipients_count: recipients.length, status: 'echec', error: err.message,
+      recipients_count: recipients.length, status: 'echec',
+      error: "Aucune connexion Brevo valide n'est associee a cette campagne. Allez dans Parametres pour en ajouter une.",
     });
     return;
   }
@@ -236,7 +202,6 @@ async function runCampaign(campaignId, manualTest = false) {
   const batchSize = campaign.batch_size || Number(process.env.MAX_RECIPIENTS_PER_BATCH || 20);
   const delaySeconds = campaign.delay_between_batches_seconds ?? Number(process.env.MIN_DELAY_BETWEEN_BATCHES_SECONDS || 30);
   const groups = chunk(recipients.map((r) => r.email), batchSize);
-  const fromEmail = connection.from_email || connection.smtp_user;
 
   let sentTotal = 0, failedTotal = 0;
 
@@ -250,8 +215,7 @@ async function runCampaign(campaignId, manualTest = false) {
       continue;
     }
     const group = groups[i];
-    const result = await sendEmail(transport, {
-      fromEmail,
+    const result = await sendEmailViaBrevo(connection, {
       to: campaign.use_bcc ? [] : group,
       bcc: campaign.use_bcc ? group : [],
       subject: campaign.subject,
@@ -558,7 +522,7 @@ function validateCampaign(b) {
   if (!b.subject || !b.subject.trim()) return "L'objet est requis.";
   if (!b.body_html || !b.body_html.trim()) return 'Le contenu du message est requis.';
   if (!b.list_id) return 'Une liste de destinataires doit etre selectionnee.';
-  if (!b.connection_id) return 'Une connexion e-mail (votre Gmail) doit etre selectionnee.';
+  if (!b.connection_id) return 'Une connexion e-mail doit etre selectionnee.';
   if (!['once', 'daily', 'weekly', 'custom_cron'].includes(b.schedule_type)) return 'Frequence invalide.';
   if (!b.batch_size || b.batch_size < 1 || b.batch_size > 500) return 'Taille de groupe invalide.';
   return null;
@@ -615,24 +579,27 @@ campaignsRouter.post('/:id/test', async (req, res) => {
 });
 app.use('/api/campaigns', requireAuth, campaignsRouter);
 
-// ---- CONNEXIONS E-MAIL (propres a chaque utilisateur, SMTP saisi par la personne) ----
+// ---- CONNEXIONS E-MAIL (propres a chaque utilisateur, via l'API Brevo) ----
 const connectionsRouter = express.Router();
 connectionsRouter.get('/', (req, res) => {
   res.json(
     store.email_connections
       .filter((c) => c.owner_id === req.session.userId)
-      .map((c) => ({ id: c.id, label: c.label, from_email: c.from_email, smtp_host: c.smtp_host, smtp_user: c.smtp_user, created_at: c.created_at }))
+      .map((c) => ({
+        id: c.id, label: c.label, from_email: c.from_email, from_name: c.from_name,
+        key_preview: c.brevo_api_key ? c.brevo_api_key.slice(0, 8) + '…' : null,
+        created_at: c.created_at,
+      }))
   );
 });
 connectionsRouter.post('/', (req, res) => {
-  const { label, from_email, smtp_host, smtp_port, smtp_secure, smtp_user, smtp_pass } = req.body || {};
-  if (!label || !isValidEmail(from_email) || !smtp_host || !smtp_user || !smtp_pass) {
-    return res.status(400).json({ error: 'Tous les champs (libelle, adresse, hote SMTP, utilisateur, mot de passe) sont requis.' });
+  const { label, from_email, from_name, brevo_api_key } = req.body || {};
+  if (!label || !isValidEmail(from_email) || !brevo_api_key) {
+    return res.status(400).json({ error: "Le libelle, l'adresse e-mail et la cle API Brevo sont requis." });
   }
   const conn = {
     id: takeId('email_connections'), owner_id: req.session.userId,
-    label, from_email, smtp_host, smtp_port: Number(smtp_port || 587), smtp_secure: !!smtp_secure,
-    smtp_user, smtp_pass, created_at: nowIso(),
+    label, from_email, from_name: from_name || '', brevo_api_key, created_at: nowIso(),
   };
   store.email_connections.push(conn);
   save();
@@ -646,17 +613,20 @@ connectionsRouter.delete('/:id', (req, res) => {
   res.json({ ok: true });
 });
 connectionsRouter.post('/test-smtp', async (req, res) => {
-  const { smtp_host, smtp_port, smtp_secure, smtp_user, smtp_pass } = req.body || {};
-  if (!smtp_host || !smtp_user || !smtp_pass) {
-    return res.status(400).json({ error: 'Renseignez au moins l\'hote, l\'utilisateur et le mot de passe SMTP.' });
+  const { brevo_api_key } = req.body || {};
+  if (!brevo_api_key) {
+    return res.status(400).json({ error: 'Renseignez votre cle API Brevo.' });
   }
   try {
-    const transport = nodemailer.createTransport({
-      host: smtp_host, port: Number(smtp_port || 587), secure: !!smtp_secure,
-      auth: { user: smtp_user, pass: smtp_pass },
+    const r = await fetch('https://api.brevo.com/v3/account', {
+      headers: { 'api-key': brevo_api_key, accept: 'application/json' },
     });
-    await transport.verify();
-    res.json({ ok: true, message: 'Connexion SMTP valide.' });
+    if (!r.ok) {
+      const text = await r.text();
+      return res.status(400).json({ error: `Cle API refusee par Brevo : ${text}` });
+    }
+    const data = await r.json();
+    res.json({ ok: true, message: `Cle API valide (compte Brevo : ${data.email || 'inconnu'}).` });
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
