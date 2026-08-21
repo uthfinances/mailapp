@@ -122,21 +122,19 @@ exemple2@mail.com"></textarea>
     <section id="settings" class="section">
       <div class="card">
         <h2>Connexion e-mail</h2>
-        <p class="help">Chaque personne connecte ici SA PROPRE adresse Gmail (ou autre fournisseur) pour envoyer ses campagnes.</p>
+        <p class="help">Chaque personne connecte ici son propre compte Brevo (gratuit, 300 e-mails/jour) pour envoyer ses campagnes — Gmail via SMTP ne fonctionne pas sur cet hébergeur gratuit.</p>
         <h3>Mes connexions</h3>
         <table id="connectionsTable">
-          <thead><tr><th>Libellé</th><th>Adresse d'envoi</th><th>Hôte SMTP</th><th>Actions</th></tr></thead>
+          <thead><tr><th>Libellé</th><th>Adresse d'envoi</th><th>Clé API</th><th>Actions</th></tr></thead>
           <tbody></tbody>
         </table>
         <form id="newConnectionForm" class="form-grid" style="margin-top:1rem;">
-          <div><label>Libellé (ex : "Mon Gmail")</label><input type="text" id="connLabel" required /></div>
-          <div><label>Adresse e-mail d'expédition</label><input type="email" id="connFromEmail" required /></div>
-          <div><label>Hôte SMTP</label><input type="text" id="connSmtpHost" placeholder="smtp.gmail.com" required /></div>
-          <div><label>Port SMTP</label><input type="number" id="connSmtpPort" placeholder="587" value="587" required /></div>
-          <div><label>Utilisateur SMTP (souvent votre e-mail)</label><input type="text" id="connSmtpUser" required /></div>
-          <div><label>Mot de passe d'application</label><input type="password" id="connSmtpPass" required /></div>
+          <div><label>Libellé (ex : "Mon Brevo")</label><input type="text" id="connLabel" required /></div>
+          <div><label>Adresse e-mail d'expédition (vérifiée sur Brevo)</label><input type="email" id="connFromEmail" required /></div>
+          <div><label>Nom affiché (facultatif)</label><input type="text" id="connFromName" placeholder="Votre nom ou votre entreprise" /></div>
+          <div><label>Clé API Brevo</label><input type="password" id="connBrevoKey" required /></div>
           <div class="full">
-            <p class="help">Pour Gmail : hôte <code>smtp.gmail.com</code>, port <code>587</code>. Générez un mot de passe d'application sur myaccount.google.com/apppasswords (nécessite la validation en 2 étapes activée).</p>
+            <p class="help">1. Créez un compte gratuit sur <strong>brevo.com</strong> · 2. Menu du haut à droite → "SMTP & API" → onglet "API Keys" → générez une clé et copiez-la ici · 3. Allez dans "Expéditeurs, domaines" → "Expéditeurs" → ajoutez votre adresse e-mail et cliquez sur le lien de confirmation reçu par mail avant de pouvoir envoyer.</p>
           </div>
           <div><button type="button" class="btn" id="testNewConnBtn">Tester avant d'ajouter</button></div>
           <div id="smtpTestResult"></div>
@@ -225,4 +223,4 @@ exemple2@mail.com"></textarea>
 
 <script src="/app.js"></script>
 </body>
-  </html>
+              </html>
