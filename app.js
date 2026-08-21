@@ -366,7 +366,7 @@ async function loadSettingsSection() {
   connectionsCache = await api('/connections');
   document.querySelector('#connectionsTable tbody').innerHTML = connectionsCache
     .map(
-      (c) => `<tr><td>${c.label}</td><td>${c.from_email}</td><td>${c.smtp_host || '—'}</td>
+      (c) => `<tr><td>${c.label}</td><td>${c.from_email}</td><td>${c.key_preview || '—'}</td>
       <td><button class="btn btn-sm btn-danger" data-action="delete-connection" data-id="${c.id}">Supprimer</button></td></tr>`
     )
     .join('') || '<tr><td colspan="4">Aucune connexion enregistrée. Ajoutez la vôtre ci-dessous.</td></tr>';
@@ -385,11 +385,8 @@ function currentConnFields() {
   return {
     label: document.getElementById('connLabel').value,
     from_email: document.getElementById('connFromEmail').value,
-    smtp_host: document.getElementById('connSmtpHost').value,
-    smtp_port: document.getElementById('connSmtpPort').value,
-    smtp_secure: false,
-    smtp_user: document.getElementById('connSmtpUser').value,
-    smtp_pass: document.getElementById('connSmtpPass').value,
+    from_name: document.getElementById('connFromName').value,
+    brevo_api_key: document.getElementById('connBrevoKey').value,
   };
 }
 
@@ -400,7 +397,6 @@ document.getElementById('newConnectionForm').addEventListener('submit', async (e
     await api('/connections', { method: 'POST', body: JSON.stringify(payload) });
     toast('Votre connexion e-mail a été ajoutée.');
     e.target.reset();
-    document.getElementById('connSmtpPort').value = '587';
     document.getElementById('smtpTestResult').textContent = '';
     loadSettingsSection();
   } catch (err) {
